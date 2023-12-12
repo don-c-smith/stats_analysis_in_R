@@ -1,0 +1,730 @@
+---
+title: "Imputation, Robust Regression, and PCA - World Happiness Data"
+author: "Don Smith"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidyverse)
+library(broom)
+library(ggpubr)
+library(mice)
+```
+
+**Introduction:**
+
+Though it is often the case that one would be better served by a result-agnostic approach to data analysis, there are plenty of interesting discussions to be had if we preemptively formulate some ideas on what we might like to see from our data. In this spirit, this analysis represents an exploratory approach to characterizing relationships between a variety of happiness indicators from the UN World Happiness Report, as well as World Bank metrics. Though in this case the following questions were formulated ex post facto, one could reasonably seek answers to them as an original motivation:
+
+1. Which Happiness Score from the UN World Happiness Report is the *most* meaningful?
+2. Can we identify variable from an entirely different source of data which may also be meaningful predictors of Happiness Scores?
+
+The following variables from the UN and World Bank data sources are the subject of this analysis:
+```{r}
+(country.info<-variable.names(data)[1:3])
+happy.info<-variable.names(data)[4:11]
+wb.info<-variable.names(data)[13:18]
+```
+
+For additional clarity, below are "full" names or explanations of variables that fall under 'happy.info' and 'wb.info':
+
+- "happy_rank" - Ranking of happiness score
+
+- "happy_score" - Aggregate happiness score calculated from all other factors
+
+- "happy_dec" - Computed decile rank of each country in terms of happiness score
+
+- "happy_gdpc" - GDP per capita
+
+- "happy_supp" - Sense of social support
+
+- "happy_health" - Healthy life expectancy at birth
+
+- "happy_free" - Happiness with level of personal freedom
+
+- "happy_gen" - How often people contribute to charitable causes
+
+- "happy_trust" - Trust level that own national government is not corrupt
+
+- "wb_pov" - % of population below UN international poverty rate
+
+- "wb_unemp" - % of able-bodied labor force unemployed
+
+- "wb_elec" - % of population with access to electricity
+
+- "wb_renew" - % of final energy use from renewable sources
+
+- "wb_hom" - Homicide rate per 100,000 people
+
+- "wb_debt" - National debt as % of government GDP
+
+**Initial Regression Analysis:**
+
+Fetching the data:
+```{r}
+data <- read.csv("happy_data.csv")
+```
+
+Performing a linear regression of each numerical predictor variable on the numerical happiness score:
+
+```{r}
+# GDPC
+gdpc_lin_model <- lm(happy_score ~ happy_gdpc, data = data)
+summary(gdpc_lin_model)
+# Results suggest a significant positive linear relationship between happy_score and happy_gdpc 
+# happy_gdpc explains approximately 63.03% of the variance in happy_score
+```
+
+```{r}
+# Sense of social support
+supp_lin_model <- lm(happy_score ~ happy_supp, data = data)
+summary(supp_lin_model)
+# Results suggest a significant positive linear relationship between happy_score and happy_supp 
+# happy_supp explains approximately 60.38% of the variance in happy_score
+```
+
+```{r}
+# Healthy life expectancy at birth
+health_lin_model <- lm(happy_score ~ happy_health, data = data)
+summary(health_lin_model)
+# Results suggest a significant positive linear relationship between happy_score and happy_health 
+# happy_supp explains approximately 60.82% of the variance in happy_score
+```
+
+```{r}
+# Happiness with level of personal freedom
+free_lin_model <- lm(happy_score ~ happy_free, data = data)
+summary(free_lin_model)
+# Results suggest a significant positive linear relationship between happy_score and happy_free 
+# happy_supp explains approximately 32.12% of the variance in happy_score
+# A much weaker predictor than the first three
+```
+
+```{r}
+# How often people contribute to charitable causes
+gen_lin_model <- lm(happy_score ~ happy_gen, data = data)
+summary(gen_lin_model)
+# Results suggest no statistically significant relationship between happy_score and happy_gen
+# happy_gen explains only 0.57% of the variance in happy_score
+# This variable *at first analysis* seems essentially useless as a predictor
+```
+
+```{r}
+# Trust level that national government is not corrupt
+trust_lin_model <- lm(happy_score ~ happy_trust, data = data)
+summary(trust_lin_model)
+# Results suggest a significant positive linear relationship between happy_score and happy_trust
+# happy_trust explains approximately 14.87% of the variance in happy_score
+# While the values are significant, they indicate that happy_trust alone does not account for a large portion of the variability in happy_score
+```
+
+**ANOVA Analysis:**
+
+Before I perform ANOVA analysis to examine happiness in the context of the 'region' field, I must assess the happy_score dependent variable for legitimacy in terms of one-way ANOVA analysis. 
+The variable must be approximately normal and have homogeneity of variance as defined by Levene's test.
+
+```{r}
+hist(data$happy_score)  # Appears approximately normal
+shapiro_happy_score <- shapiro.test(data$happy_score)
+print(shapiro_happy_score)  # Is quantitatively normal by Shapiro-Wilk
+leveneTest(happy_score ~ region, data = data)  # p-value is 0.057. By convention, this is close enough to proceed
+```
+
+ANOVA:
+
+```{r}
+# One-way ANOVA of happiness score against world region
+region_anova_model <- aov(happy_score ~ region, data = data)
+summary(region_anova_model)
+# Results indicate that there is a significant difference in happiness scores among the world regions
+
+# Post-hoc testing via Tukey HSD
+tukey_region_result <- TukeyHSD(region_anova_model)
+
+# Convert Tukey results to a dataframe
+tukey_df <- as.data.frame(tukey_region_result$region)
+
+# Sort in descending order of adjusted p-value strength
+sorted_tukey_df <- tukey_df[order(tukey_df$`p adj`), ]
+
+# Filter to only statistically significant adjusted p-values
+filtered_tukey_results <- sorted_tukey_df[sorted_tukey_df$`p adj` < 0.05, ]
+
+# Check number of statistically significant relationships under Tukey
+print(nrow(filtered_tukey_results))  # There are 14 significant mean differences
+
+# They are as follows:
+print(filtered_tukey_results)
+```
+
+**Initial Conclusions:**
+
+Initial analysis of predictors from the happiness data set shows that:
+1. GDPC is the strongest predictor, but not by much
+2. GDPC, social support, and healthy life expectancy are the strongest predictors
+3. Happiness with personal freedom and trust in government are significant predictors, but are much weaker than the first three
+4. The generosity variable is not significant
+5. Tukey post-hoc testing on happiness score against region reveals 14 significant differences among the combinations
+6. The immediate takeaways from the Tukey results are citizens are significantly happier in Western Europe or Australia and New Zealand, and also that happiness scores are significantly lower anywhere in Africa or the Middle East
+
+**Considering Imputation of World Bank Variables**
+
+Two variables from the World Bank data set, wb_pov and wb_debt, have an abundance of missing values.
+Per statistical standards of practice, I need to run correlations on those fields data with the missing values intact. 
+
+If meaningful correlation is present with the missing values *included,* I'll need to develop an imputation strategy.
+
+Assessing if those two metrics are useful even with all of those missing data by regressing both predictors on happy_score.
+
+```{r}
+# Percent of population below UN international poverty rate
+pov_lin_model <- lm(happy_score ~ wb_pov, data = data)
+summary(pov_lin_model)
+# Even with all of the missing values, we still have a highly-significant result.
+# In fact, this is a stronger predictor than some of the happiness metrics!
+# Results are also logical - more poverty, less happiness.
+# In other words, interpolation is necessary.
+```
+
+```{r}
+# National debt as % of government GDP
+debt_lin_model <- lm(happy_score ~ wb_debt, data = data)
+summary(debt_lin_model)
+# Nothing encouraging here, which actually isn't surprising.
+# Here's why: a lot of advanced and highly-capitalized economies run really high debt rates (the USA is a great example.)
+# But, lots of badly-run countries *also* run lots of debt.
+# As such, you can have countries with high debt scores that can be quite happy (France, UK, Belgium) and others with high debt scores that aren't nearly as happy (Croatia, Greece, Bhutan.)
+# This is something I wouldn't bother imputating - I think the conclusion is fairly clear and logical.
+```
+
+Assessing the other World Bank predictors (the ones without lots of missing data) to see what we have.
+
+```{r}
+# % of able-bodied labor force that is unemployed
+unemp_lin_model <- lm(happy_score ~ wb_unemp, data = data)
+summary(unemp_lin_model)
+# Results are highly-significant but not very powerful. Only 7% of variance explained.
+# This might be more powerful in a cluster or a parsimonious model might just toss it out.
+# The directionality is logical - more happiness, less unemployment.
+# The weakness of this predictor surprises me.
+```
+
+```{r}
+# % of population with access to electricity
+elec_lin_model <- lm(happy_score ~ wb_elec, data = data)
+summary(elec_lin_model)
+# This relationship is *highly* significant and moves in the direction I'd expect - higher access to electricity means more happiness.
+# It also explains over 35% of the variance in happy_score.
+# Here's why I find this predictor interesting. If you look at the data, most values are very high. There aren't a ton of countries with low access to electricity. So, to see this powerful a relationship with so many members having such high scores, I might conclude that the absence of electrical access is a big deal in terms of happiness. (Which makes sense, given the shape of the modern world.)
+# I also wonder about the likely concurrence of war/conflict and lack of reliable access to electricity.
+```
+
+```{r}
+# % of final energy use that comes from renewable sources
+renew_lin_model <- lm(happy_score ~ wb_renew, data = data)
+summary(renew_lin_model)
+# The relationship is significant and explains a useful (if not huge) amount of variance in happy_score on its own.
+# However the directionality is surprising. More renewable energy use is associated with a *lower* happiness score.
+```
+
+```{R}
+# Homicide rate per 100,000 people
+hom_lin_model <- lm(happy_score ~ wb_hom, data = data)
+summary(hom_lin_model)
+# Non-significant, almost no variance explained.
+# A couple of things occur to me - first, murder is actually decently uncommon in the developed world, and second, lots of countries are going to either lie about it or just not track it. 
+# In essence, I don't think countries run by murderous dictators are going to carefully report their murder rates to the UN.
+```
+
+Given these results, I'll begin imputation for wb_pov.
+
+It's important to keep the original data integrity intact. Therefore, I'll add a new column for the imputed data immediately to the right of the wb_pov column and copy the extant values in wb_pov into the new column:
+
+```{r}
+# Find the index of the 'wb_pov' column
+wb_pov_index <- which(names(data) == "wb_pov")
+
+# Add a new column named 'wb_pov_imp' immediately to the right of 'wb_pov'
+data <- data.frame(data[, 1:wb_pov_index], wb_pov_imp = NA, data[, (wb_pov_index + 1):ncol(data)])
+
+# Copy the values from 'wb_pov' into the new column 'wb_pov_imp'
+data$wb_pov_imp <- data$wb_pov
+```
+
+A key decision at this stage is whether I'm going to impute means or medians into the empty cells.
+
+If the data in wb_pov are skewed or have outliers, the median is the robust choice. 
+However, if the data are roughly normally distributed, the mean is preferred.
+
+A histogram should makes this easy to assess:
+
+```{r}
+# Plot a histogram of 'wb_pov' with default settings
+hist(data$wb_pov)
+```
+
+Obviously, the data are tremendously skewed. So median imputation is the correct choice.
+I begin by calculating the median wb_pov values at the happy_dec (decile) level. Decile-level granularity of medians should be sufficiently precise.
+
+```{r}
+# Group the data by 'happy_dec' and calculate the median of 'wb_pov' for each decile.
+decile_medians <- data %>% group_by(happy_dec) %>% summarize(decile_median_wb_pov = median(wb_pov, na.rm = TRUE))  # Pipelining commands
+decile_medians  # Displaying medians
+```
+
+These values make logical sense. While there's some discontinuity, we observe the unhappiest decile having the *largest* median wb_pov value and the happiest decile having the *lowest* median wb_pov value.
+
+Given that these values appear reasonable/workable, I can impute them into the new column at the happy_dec level:
+
+```{r}
+# Imputation via iteration
+for (i in 1:nrow(decile_medians)) {  # For each row in the decile_medians frame I just built
+  
+  decile <- decile_medians$happy_dec[i]  # Fetch the decile value from decile_medians
+  
+  median_val <- decile_medians$decile_median_wb_pov[i] # Then, fetch the actual decile-level median *value* from decile_medians and store in median_val
+  
+  # Fill in the missing values in wb_pov_imp for rows with a matching happy_dec value with the calculated median
+  data$wb_pov_imp[data$happy_dec == decile & is.na(data$wb_pov_imp)] <- median_val
+}
+```
+
+Now, I create a new sub-frame with only the three relevant columns for a sanity check:
+```{r}
+imp_check <- data.frame(happy_dec = data$happy_dec, wb_pov = data$wb_pov, wb_pov_imp = data$wb_pov_imp)  # Reducing the dataframe to critical columns
+imp_check  # Print reduced dataframe
+```
+
+Note that median *substitution* means that where original values already exist in the wb_pov field, they persist in wb_pov_imp and are *not* overwritten.
+
+The final step is to check the distribution of wb_pov_imp as compared to the distribution of wb_pov and see if the overall shape of the original distribution (which was heavily skewed to the right) has been preserved after imputation:
+
+```{r}
+# Running two histograms with default settings
+hist(data$wb_pov)
+hist(data$wb_pov_imp)
+```
+
+The results aren't perfect, but they're quite good overall.
+
+Now we have the 'acid test.' We need to run the simple linear models of wb_pov and wb_pov_imp against happy_score. 
+
+If the imputed column is a *worse* predictor after median substitution despite having many fewer missing values, I will have to conclude that median substitution was the wrong method and will need to try again with means substitution.
+
+Beginning the evaluation of the interpolation:
+
+```{r}
+# Modeling imputed poverty rate field against happy_score
+inter_pov_lin_model <- lm(happy_score ~ wb_pov_imp, data = data)
+summary(inter_pov_lin_model)
+```
+
+Results:
+
+Non-imputed data: 
+- 101 deleted observations
+- F statistic of 22.75
+- p value of 1.485e-05
+- Multiple R^2 of 0.3003
+
+Imputed data:
+- No deleted observations
+- F statistic of 96.54
+- p value of less than 2.2e-16
+- Multiple R^2 of 0.3853
+
+Conclusion:
+The median imputation at the decile level referencing happy_score was a definite success.
+
+**Variable Assessment**
+
+To guide my choices in analytical methodology, I need to assess all of the continuous core variables for fundamental characteristics that will indicate whether they are good or even *valid* candidates for more advanced statistical analysis. I first need to test each numerical variable for homoscedasticity and normality.
+
+1. Linearity refers to the assumption that there is a linear relationship between the dependent and predictor variables.
+
+2. Homoscedasticity (AKA constant variance) refers to the assumption that the variability of the data points is roughly constant across the range of a variable. To evaluate this, we plot the variable 'against itself' on a scatterplot with a reference line with an intercept of 0 and a slope of 1. 
+The reference line represents the ideal scenario of perfect homoscedasticity, where the spread of data points should be relatively constant along the range of the variable. In other words, if the data points are evenly scattered both around and along the reference line, it suggests that the data have homoscedasticity. Homoscedasticity can also be evaluated using the Breusch-Pagan test wherein a significant p-value indicates heteroscedasticity.
+
+3. Normality refers to the assumption that the data follows a normal distribution when plotted on a histogram. Normality is assumed for many parametric statistical tests like t-tests and linear regression. Common ways to assess normality are the Q-Q plot and the Shapiro-Wilk test. The Shapiro-Wilk test is based on the correlation between the data and the expected values for a normal distribution. It calculates a 'W' statistic with the null hypothesis that the data *are* normally distributed. If the p-value obtained from the test is significant, it indicates that the data are *not* normally distributed.
+
+Testing each of the ten predictors for:
+1. Linearity (via linear correlation)
+2. Homoscedasticity (via scatterplot and Breusch-Pagan)
+3. Normality (via Q-Q plot and Shapiro-Wilk)
+
+```{r}
+# Testing GDPC
+cor.test(data$happy_score, data$happy_gdpc)  # Correlation
+plot(x=data$happy_gdpc, y=data$happy_score)  # Scatterplot
+bptest(gdpc_lin_model)  # Breusch-Pagan - significant p-value indicates heteroscedasticity
+# Note on Breusch-Pagan - Per documentation: "By default, the studentized version of the test is conducted, because the raw residual version is known to have severe size distortions."
+
+ggqqplot(data$happy_gdpc, title = "Plot for Normality of happy_gdpc")  # Q-Q plot for normality
+
+shapiro_gdpc <- shapiro.test(data$happy_gdpc)  # Shapiro-Wilk test of normality
+print(shapiro_gdpc)
+```
+
+GPDC results:
+1. Linear
+2. Homoscedastic
+3. Not normal
+
+```{r}
+# Testing healthy life expectancy at birth
+cor.test(data$happy_score, data$happy_health)  # Correlation
+plot(x=data$happy_health, y=data$happy_score)  # Scatterplot
+bptest(health_lin_model)  # Breusch-Pagan - significant p-value indicates heteroscedasticity
+
+ggqqplot(data$happy_health, title = "Plot for Normality of happy_health")  # Q-Q plot for normality
+
+shapiro_health <- shapiro.test(data$happy_health)  # Shapiro-Wilk test of normality
+print(shapiro_health)
+```
+
+Healthy life expectancy results:
+1. Linear
+2. Homoscedastic
+3. Not normal
+
+```{r}
+# Testing social support
+cor.test(data$happy_score, data$happy_supp)  # Correlation
+plot(x=data$happy_supp, y=data$happy_score)  # Scatterplot
+bptest(supp_lin_model)  # Breusch-Pagan - significant p-value indicates heteroscedasticity
+
+ggqqplot(data$happy_supp, title = "Plot for Normality of happy_supp")  # Q-Q plot for normality
+
+shapiro_supp <- shapiro.test(data$happy_supp)  # Shapiro-Wilk test of normality
+print(shapiro_supp)
+```
+
+Social support results:
+1. Linear
+2. Homoscedastic
+3. Not normal
+
+```{r}
+# Testing poverty rate
+cor.test(data$happy_score, data$wb_pov_imp)  # Correlation
+plot(x=data$wb_pov_imp, y=data$happy_score)  # Scatterplot
+bptest(imp_pov_lin_model)  # Breusch-Pagan - significant p-value indicates heteroscedasticity
+
+ggqqplot(data$wb_pov_imp, title = "Plot for Normality of wb_pov")  # Q-Q plot for normality
+
+shapiro_pov <- shapiro.test(data$wb_pov_imp)  # Shapiro-Wilk test of normality
+print(shapiro_pov)
+```
+
+Poverty rate results:
+1. Linear
+2. Heteroscedastic
+3. Not normal
+
+```{r}
+# Testing electricity access
+cor.test(data$happy_score, data$wb_elec)  # Correlation
+plot(x=data$wb_elec, y=data$happy_score)  # Scatterplot
+bptest(elec_lin_model)  # Breusch-Pagan - significant p-value indicates heteroscedasticity
+
+ggqqplot(data$wb_elec, title = "Plot for Normality of wb_elec")  # Q-Q plot for normality
+
+shapiro_elec <- shapiro.test(data$wb_elec)  # Shapiro-Wilk test of normality
+print(shapiro_elec)
+```
+
+Electricity access results:
+1. Linear
+2. Homoscedastic
+3. Not normal
+
+```{r}
+# Testing sense of freedom
+cor.test(data$happy_score, data$happy_free)  # Correlation
+plot(x=data$happy_free, y=data$happy_score)  # Scatterplot
+bptest(free_lin_model)  # Breusch-Pagan - significant p-value indicates heteroscedasticity
+
+ggqqplot(data$happy_free, title = "Plot for Normality of happy_free")  # Q-Q plot for normality
+
+shapiro_free <- shapiro.test(data$happy_free)  # Shapiro-Wilk test of normality
+print(shapiro_free)
+```
+
+Sense of freedom results:
+1. Linear
+2. Heteroscedastic
+3. Not normal
+
+```{r}
+# Testing % of final energy use from renewables
+cor.test(data$happy_score, data$wb_renew)  # Correlation
+plot(x=data$wb_renew, y=data$happy_score)  # Scatterplot
+bptest(renew_lin_model)  # Breusch-Pagan - significant p-value indicates heteroscedasticity
+
+ggqqplot(data$wb_renew, title = "Plot for Normality of wb_renew")  # Q-Q plot for normality
+
+shapiro_renew <- shapiro.test(data$wb_renew)  # Shapiro-Wilk test of normality
+print(shapiro_renew)
+```
+
+% of renewables results:
+1. Linear
+2. Homoscedastic
+3. Not normal
+
+```{r}
+# Testing trust in government
+cor.test(data$happy_score, data$happy_trust)  # Correlation
+plot(x=data$happy_trust, y=data$happy_score)  # Scatterplot
+bptest(trust_lin_model)  # Breusch-Pagan - significant p-value indicates heteroscedasticity
+
+ggqqplot(data$happy_trust, title = "Plot for Normality of happy_trust")  # Q-Q plot for normality
+
+shapiro_trust <- shapiro.test(data$happy_trust)  # Shapiro-Wilk test of normality
+print(shapiro_trust)
+```
+
+Trust in government results:
+1. Linear
+2. Heteroscedastic
+3. Not normal
+
+```{r}
+# Testing % unemployment
+cor.test(data$happy_score, data$wb_unemp)  # Correlation
+plot(x=data$wb_unemp, y=data$happy_score)  # Scatterplot
+bptest(unemp_lin_model)  # Breusch-Pagan - significant p-value indicates heteroscedasticity
+
+ggqqplot(data$wb_unemp, title = "Plot for Normality of wb_unemp")  # Q-Q plot for normality
+
+shapiro_unemp <- shapiro.test(data$wb_unemp)  # Shapiro-Wilk test of normality
+print(shapiro_unemp)
+```
+
+% unemployment results:
+1. Linear
+2. Homoscedastic (by test, but not really by plot - marginal)
+3. Not normal
+
+```{r}
+# Testing change in GPDC
+cor.test(data$happy_score, data$gdpc_change)  # Correlation
+plot(x=data$gdpc_change, y=data$happy_score)  # Scatterplot
+bptest(gdpc_change_lin_model)  # Breusch-Pagan - significant p-value indicates heteroscedasticity
+
+ggqqplot(data$gdpc_change, title = "Plot for Normality of wb_unemp")  # Q-Q plot for normality
+
+shapiro_gdpc_change <- shapiro.test(data$gdpc_change)  # Shapiro-Wilk test of normality
+print(shapiro_gdpc_change)
+```
+
+GDPC change results:
+1. Linear (barely)
+2. Homoscedastic
+3. Normal (because most changes are tiny)
+
+**Variable Assessment Conclusions:**
+1. All variables with significant correlations are provably linear except gdpc_change, which is 'borderline.'
+2. No variables are normally distributed *except* gpdc_change, because GDPC doesn't move much, contextually.
+3. Two variables are heteroscedastic by test (poverty rate and sense of freedom) and one is homoscedastic by test but the plot is unconvincing (percent unemployment.)
+4. There are ten significant continuous variables by test. Of these ten, none are normally distributed, and 30% are either provably or qualitatively heteroscedastic.
+5. Therefore, linear regression is not an appropriate assessment technique.
+
+Significant pairwise predictors are:
+1. happy_gpdc
+2. happy_health
+3. happy_supp
+4. wb_pov_imp
+5. wb_elec
+6. happy_free
+7. wb_renew
+8. happy_trust
+9. wb_unemp
+
+Fortunately, all of the significant predictors exhibit meaningful linearity. So, on a *pairwise* level, these correlations are meaningful to us in terms of strength of relationship.
+
+**The Assumption of Independence:**
+
+Having assessed that standard linear regression is not an appropriate assessment technique for the entire set of variables considered together, I need to address the assumption of independence, which will influence my selection of more appropriate analytical paths.
+
+The assumption of independence means that the observations in the data set are 1) not influenced by each other and 2) do not depend on each other. 
+In other words, the assumption of independence is the assumption that the value of one observation neither affects or provides any information about the value of another observation.
+
+Given that the assumption of independence is most reliably addressed in experimental design, a consideration of independence is, in most cases, a qualitative endeavour.
+
+In the context of these data, there are actually *two* separate discussions about independence to consider.
+
+The first is a consideration of the assumption of independence regarding the core dependent variable, which is happy_score. In the context of this variable, the discussion of independence centers around the question, "Do we have reason to believe that the happiness score of one country is not affected by or dependent upon the happiness score of another country?"
+
+Here is the crux of the issue, as I see it:
+
+At a macro level, we can likely say that if the vast majority of countries in the world suddenly became very unhappy, given the globalized and economically interdependent nature of our world community, it seems likely that this would (either immediately or eventually) have a negative effect on the happiness of other countries.
+
+More specifically, if there were a country that were dependent on another in a meaningful way, you could anticipate the happiness of the two countries being interrelated. 
+
+For example, consider that the USA gets a large proportion of its manufactured consumer goods from China. If China were to suddenly have a societal collapse and cease manufacture and export, citizens of the USA would no longer be able to buy cheap consumer goods, and probably would become unhappy as a result. (Of course, it's likely that a societal collapse would also make Chinese citizens unhappy.)
+
+Additionally, problems in one country that is geographically contiguous with other countries *can* affect those countries directly: refugees fleeing a war zone can cause issues in neighboring nations, nuclear meltdowns can cause problems across borders, (Chernobyl, for example,) air or water-table pollution can affect other nearby countries, disease outbreaks can be spread to neighboring populations, etc.
+
+We can in fact see some statistically provable mean-differences that could support this idea: the results of my Tukey HSD analysis above show 14 separate significant mean happiness differences at the world region level. We can make some reasonable logical inferences about the results - it makes sense that wealthy, peaceful world regions (Australia/New Zealand, most of Western Europe,) are happier than poor, war-torn regions (most of Africa, the Middle East.) 
+
+Therefore, it's logical to assume that the very existence of these geographical "happiness clusters" indicates that the nations *do* have some effect on each others' happiness levels.
+
+As such, on a macroscopic level, the answer to the question, "Can one nation's level of happiness be affected by or dependent upon the happiness score of another country" is almost certainly, "Yes, absolutely." Therefore, I'd likely conclude that there's a strong argument *against* the assumption of independence for happy_score.
+
+However, if I limit consideration of the independence question to the context of the World Happiness research project and focus on the *actual metric 'happy_score' itself,* (which, one could argue, is the scope most relevant to this analysis,) I would be asking the question, "Were the happiness scores that individual respondents in individual countries gave in the course of their participation in this research effort directly affected by the scores given by other individuals in other countries?" 
+
+In other words, I'd be asking if, on a more immediate level, whether the answer given by a person in Kansas about how happy they are was likely to have been affected by the response someone gave in Montreal, or London, or Azerbaijan.
+
+Within that framework, there's a strong argument to be made that no, they were not. It seems unlikely *in the extreme* that a respondent in Kansas would have said, "Before I answer, how happy did the Laotians say they were?"
+
+There's a bit of a conceptual 'trap' with these data - because the scores are aggregated at the nation level, it's easy to overlook that the respondents aren't nations - they're the *citizens* of the nations. The data derived from the individuals has been rolled up to the nation level, but the actual data is derived from individual responses.
+
+So, in sum, given the context of the study and my specific interest in the data, my conclusion about the assumption of independence with regard to happy_score is as follows: 
+
+Given that these scores are calculated from the ratings given by individual citizens of a given country, I may reasonably assume that these individuals did not collude across national boundaries before giving their answers. Therefore, in the context of the individual observations contributing to the aggregated nation-level happiness scores, it is reasonable to assume the independence of those responses.
+
+Moreover, while it is true that the overall happiness of individuals in a given country can be affected by the happiness/environments/actions of other nations or geographical regions, such interdependence and interrelation is an inevitable consequence of a modern globalized society. Allowing that consequence to stymie all analytical considerations of the international community would obviate the entire field of international social research.
+
+On the other hand, given what these predictor variables represent, I think even a prima facie consideration of the predictors is sufficient to show that they're *clearly* not independent. Any argument that there isn't an intrinsic and *obvious* relationship among a country's level of poverty, its per-citizen economic output, its access to electricity, its general level of health, its citizens' sense of social support, etc. would be laughable.
+
+However, contextually, I once again don't think this is a problem. Total independence of predictor variables is a very rare thing - usually limited to more purely scientific, non-human research efforts - and even in *those* cases true independence is rare. An agroscientist studying crop growth might record wind patterns, rainfall, sun exposure, and temperature - all things which *seem* independent, but in fact are intrinsically related.
+
+It's a general statistical truth that *truly* independent predictors of a *purely* independent variable of study can only exist in absurd, functionally useless schemata.
+
+Therefore, I have established 1) a conceptual defense of the assumption of independence with respect to happy_score values and 2) a conceptual defense of the predictor variables insofar as we understand that the predictor variables are interrelated, which is inevitable given the framing of the work.
+
+**Principal Component Analysis**
+
+To further explore this interrelation of the predictor variables, I will perform Principal Component Analysis. This is a technique used to emphasize variation and highlight strong patterns in a data set.
+
+PCA can be performed in R using the prcomp() method. The prcomp() is preferred over the alternate princomp() method because prcomp() uses singular value decomposition, which is more numerically accurate.
+
+Note that I need to standardize the predictor variables so that they're all on the same scale, mostly because PCA is sensitive to the variances of predictor variables. 
+The scale() method standardizes variables to have a mean of 0 and standard deviation of 1.
+
+Note also that PCA can't handle missing or infinite values. So, rather than doing row-deletion, I'm going to impute the *very* small number of missing values for the significant World Bank predictors, (which are wb_elec, wb_renew, and wb_unemp,) using the Multivariate Imputation by Chained Equations imputation method from the "mice" package.
+
+```{r}
+# Start by subsetting the data frame to include only the significant predictor variables
+predictor_subset <- data[,c('happy_gdpc', 'happy_health', 'happy_supp', 'wb_pov_imp', 'wb_elec', 'happy_free', 'wb_renew', 'happy_trust', 'wb_unemp')]
+
+# Perform multivariate imputation
+imputed_data <- mice(predictor_subset, m=5, maxit = 50, method = 'pmm', seed = 500)
+
+# Syntax notes:
+# m is the number of multiple imputations to be created (5)
+# maxit is the number of iterations to be performed by the EM algorithm while creating the imputations (50)
+# method is the method to use for imputation ('pmm' is Predictive Mean Matching, which is preferred for imputing numeric data)
+# seed sets the seed for the random number generator, which makes the results reproducible
+
+# Create a fully-imputed dataset
+complete_data <- complete(imputed_data, 1)
+
+# Scale the predictors
+scaled_predictors <- scale(complete_data)
+
+# Perform the PCA
+pca_result <- prcomp(scaled_predictors)
+
+# Summarize results
+summary(pca_result)
+
+# Generate a Scree plot
+plot(pca_result, type="l")
+
+# Display the PCA loadings
+print(pca_result$rotation)
+
+# Generate a Biplot
+biplot(pca_result)
+
+# Note that a Biplot displays the scores of the samples on the principal components as points and the loadings of the variables as vectors. 
+# The direction and length of the vectors indicate how each variable influences the principal components. 
+# Variables that are close together on the plot are positively correlated, variables that are orthogonal are uncorrelated, and variables that are far apart (180 degrees from each other) are negatively correlated.
+# The Biplot is basically unreadable in RStudio - you need to export the file and expand it.
+
+# Set the parameters of the output image file
+png(filename="PCAbiplot.png", width=2000, height=2000, res=300)
+
+# Recreate the biplot
+biplot(pca_result, scale = 0)
+
+# Close the device
+dev.off()
+```
+
+RESULTS:
+- The first three principle components together explain about 77% of the total variance.
+- There's a meaningful dropoff in variance explained after the first three PCs.
+- The PCA loadings indicate the following:
+
+1. For PC1, the variables with the highest absolute loadings are happy_gdpc, happy_health, happy_supp, and wb_elec. This suggests that these variables are the most important in defining PC1. Since these variables have positive loadings, they are positively associated with PC1 - an increase in these variables corresponds to an increase in the PC1 score. The predictors wb_pov_imp and wb_renew are also important for PC1 but in the negative direction, indicating that increases in these variables led to a decrease in PC1.
+
+2. For PC2, the variables with the highest absolute loadings are happy_free, wb_renew, happy_trust, and wb_unemp. Note that the predictors happy_free, wb_renew, and happy_trust are negatively associated with PC2, while wb_unemp is positively associated with PC2.
+
+3. For PC3, the variables with the highest absolute loadings are happy_trust, wb_unemp, and wb_pov_imp. All these predictors have negative loadings, which suggests that increases in these variables correspond to a decrease in PC3.
+
+Note that the rule of thumb is to keep enough components to explain at least 70% of the total variance. So we'll retain the first three components, which explain a total of 72.1% of the variance.
+
+The second table shows the loadings of the original variables on each component. This table can be interpreted in terms of correlations. 
+
+For example, for PC1:
+- The variable happy_gdpc has a loading of 0.44, which means it is strongly positively correlated with PC1.
+- The variable wb_pov_imp has a loading of -0.32, meaning it is negatively correlated with PC1.
+- The variables happy_health, happy_supp, and wb_elec also have strong positive loadings on PC1, suggesting that these variables move together. When one increases, the other ones tend to increase as well.
+
+These loadings help to interpret the 'meaning' of each component. For example, if PC1 is heavily influenced by variables related to happiness and well-being (happy_gdpc, happy_health, happy_supp, wb_elec), I could interpret PC1 as a measure of 'general well-being.'
+
+Similarly, I would interpret the other components based on the variables with high loadings for those components. For PC2, happy_free, wb_unemp, and wb_renew have high loadings, so I might state that PC2 is a measure of 'freedom, development, and employment.'
+
+And for PC3, we essentially have gdpc_change with some contribution from wb_pov_imp, happy_trust, and wb_unemp. So, I might look at this as a 'recent events' component insofar as if something had suddenly 'gone bad' for a country, we might see meaningful shifts in gdpc change, trust in government, unemployment, and poverty rate.
+
+**Maximum likelihood-type M-estimation**
+
+- Recall that earlier variable assessment shows that the assumptions of ordinary OLS-based regression are too badly violated to proceed with that methodology.
+- Additionally, several of of variables have notable outliers.
+- This leads me to an alternate analytical method: Maximum likelihood-type M-estimation.
+- MM-Estimation is an extension of Huber's M-estimation (which is a generalization of the ordinary least squares (OLS) method such that the sum of *absolute differences* is minimized rather than the sum of squares.) 
+- MM-Estimation has high breakdown point properties, meaning it can handle a larger number of outliers. It involves an initial step to obtain robust initial estimates (via S-estimation or LTS-estimation), and then iteratively refines these estimates via standard M-estimation.
+- This method is available in R via the 'robustbase' package.
+- Note that I need to scale all of the predictor variables first, because interpreting the strength of predictors based on their coefficients or t-values can be misleading, especially when the predictors are on different scales or have different units of measurement. (In essence, variables with larger ranges or variances can *appear* more important simply because of the units in which they are measured.)
+
+```{r}
+# Create scaled versions of the predictors
+data$happy_gdpc_scaled <- scale(data$happy_gdpc)
+data$gdpc_change_scaled <- scale(data$gdpc_change)
+data$happy_health_scaled <- scale(data$happy_health)
+data$happy_supp_scaled <- scale(data$happy_supp)
+data$wb_pov_imp_scaled <- scale(data$wb_pov_imp)
+data$wb_elec_scaled <- scale(data$wb_elec)
+data$happy_free_scaled <- scale(data$happy_free)
+data$wb_renew_scaled <- scale(data$wb_renew)
+data$happy_trust_scaled <- scale(data$happy_trust)
+data$wb_unemp_scaled <- scale(data$wb_unemp)
+
+# Running the robust regression with scaled predictors
+mm_est_model <- lmrob(happy_score ~ happy_gdpc_scaled + gdpc_change_scaled + happy_health_scaled + happy_supp_scaled + wb_pov_imp_scaled + wb_elec_scaled + happy_free_scaled + wb_renew_scaled + happy_trust_scaled + wb_unemp_scaled, data = data)
+
+# Summarizing the model
+summary(mm_est_model)
+
+# Plotting the model
+plot(mm_est_model)
+```
+
+- Some very interesting results. In this model, which by adjusted R-squared explains about 83% of the variance in happy_score, the three variables gdpc_change, wb_elec, and happy_free are *not* significant in predicting happy_score. This a change from the results of the correlation table and the PCA.
+
+- Based on the absolute value of the standardized coefficients in the model, the three most important predictors are:
+1. happy_gdpc_scaled (0.3621)
+2. happy_health_scaled (0.2957)
+3. happy_supp_scaled (0.2633)
+- This suggests that changes in GDP per capita, health, and social support (when these predictors are measured in standard deviation units) are associated with the largest changes in happiness score.
+
+- Based on the p-values in the model, the three most *significant* predictors are:
+1. happy_gdpc_scaled (2.55e-05)
+2. happy_health_scaled (4.31e-05)
+3. happy_supp_scaled (0.000505)
+- Again we have GDP per capita, health, and social support. The fact that these variables emerge as important using both criteria strengthens the evidence for their primacy.
+- We see a meaningful role for wb_pov_imp and happy_trust, which is borne out by the biplot of the PCA.
