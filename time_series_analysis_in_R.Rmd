@@ -1,0 +1,651 @@
+---
+title: "Time-Series Analysis"
+author: "Don Smith"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lubridate)
+library(scales)
+library(forecast)
+library(dtwclust)
+library(hts)
+library(stringr)
+```
+
+**Introduction to the NYPD Crime Report Data**
+The data used for this time-eries analysis are a subset of a very large dataset which is a representation of over 8.3 million crimes reported to the New York City Police Department from 2006 to 2019.
+
+The data are organized at the one-line-per-reported-crime level, and contain the date the crime was reported in addition to other fields containing information about the crime (jurisdiction, type of offense, city borough where the crime was committed, etc.)
+
+These data are an excellent candidate for time-series analysis because they are dated observations of reported crimes taken and recorded by the same agency in the same city at an exactly regular interval (i.e. each day.)
+
+Before beginning my analysis, I will select a subset of the data so that I'm not attempting to work with a dataframe containing over eight million rows. 
+I will select only those crimes reported to the NYPD between 1/1/2010 and 12/31/2015 and will also drop unneeded columns.
+
+**Subsetting and Filtering the Data**
+```{r}
+# Importing the full dataset
+crime_data_full <- read.csv("nypd_crime_data.csv")
+
+# Casting the 'RPT_DT' column (date crime was reported) as date-type
+crime_data_full$RPT_DT <- as.Date(crime_data_full$RPT_DT, format="%m/%d/%Y")
+
+# Checking to see if type conversion succeeded
+str(crime_data_full$RPT_DT)
+
+# Checking total number of rows in full dataset
+nrow(crime_data_full)
+
+# Subsetting the dataframe to contain only dates between 1/1/2010 and 12/31/2015
+crime_data_subset <- subset(crime_data_full, RPT_DT >= as.Date("2010-01-01") & RPT_DT <= as.Date("2015-12-31"))
+
+# Checking total number of rows in subset dataset
+nrow(crime_data_subset)
+```
+
+There are now just under 3 million rows in the dataset. There are 35 fields in the dataset, many of which will not be used in my analysis. 
+Per the data dictionary for this dataset, I want to keep the following columns:
+
+- CMPLNT_NUM: Randomly generated persistent ID for each complaint
+- RPT_DT: Date event was reported to police
+- KY_CD: 3-digit offense classification code
+- OFNS_DESC: Description of offense corresponding with key code
+- LAW_CAT_CD: Level of offense - felony, misdemeanor, violation
+- BORO_NM: The name of the borough in which the incident occurred
+- PREM_TYP_DESC: Description of premises - grocery store, residence, street, etc.
+- SUSP_AGE_GROUP: Suspect’s Age Group
+- SUSP_RACE: Suspect’s Race Description
+- SUSP_SEX: Suspect’s Sex Description
+- VIC_AGE_GROUP: Victim's age group
+- VIC_RACE: Victim’s Race Description
+- VIC_SEX: Victim’s Sex Description
+
+```{r}
+# Filtering columns
+
+# First, establish vector of the columns we want to include
+wanted_columns <- c("CMPLNT_NUM", 
+                    "RPT_DT", 
+                    "KY_CD", 
+                    "OFNS_DESC", 
+                    "LAW_CAT_CD", 
+                    "BORO_NM", 
+                    "PREM_TYP_DESC", 
+                    "SUSP_AGE_GROUP", 
+                    "SUSP_RACE", 
+                    "SUSP_SEX",
+                    "VIC_AGE_GROUP",
+                    "VIC_RACE",
+                    "VIC_SEX")
+
+# Then, create column-filtered dataframe
+crime_data <- crime_data_subset[,wanted_columns]
+```
+
+**Handling Missing Values**
+Time-Series analysis uses many methods which are not resilient to missing values. To that end, I need to replace any NULL values in the columns (present in these data as a string of either "(null)" or "UNKNOWN") with the correct R value for 'Unknown,' which is NA.
+
+```{r}
+# Replace '(null)' or 'UNKNOWN' with NA in non-Date columns
+crime_data[] <- lapply(crime_data, function(x) {
+  if (is.character(x) || is.factor(x) || is.numeric(x)) {
+    return(ifelse(x %in% c("(null)", "UNKNOWN"), NA, x))
+  } else {
+    return(x)
+  }
+})
+```
+
+**Further Data-Cleaning: Column by Column**
+```{r}
+# For each column, check unique values and replace/modify as necessary
+print(unique(crime_data$KY_CD))  # No problematic values found
+
+print(unique(crime_data$OFNS_DESC))  # No problematic values found, but could use simplifying/merging of categories
+
+print(unique(crime_data$LAW_CAT_CD))  # No problematic values found
+
+print(unique(crime_data$BORO_NM))  # No problematic values found
+
+print(unique(crime_data$PREM_TYP_DESC))  # No problematic values found, but could use simplifying/merging of categories
+
+print(unique(crime_data$SUSP_AGE_GROUP))  # Many illegitimate values found, further cleaning is necessary
+# Defining legitimate values for age range
+legitimate_age_values <- c("<18", "18-24", "25-44", "45-64", "65+")
+# Replace illegitimate values with NA
+crime_data$SUSP_AGE_GROUP <- ifelse(crime_data$SUSP_AGE_GROUP %in% legitimate_age_values, crime_data$SUSP_AGE_GROUP, NA)
+# Reprinting unique values for SUSP_AGE_GROUP
+print(unique(crime_data$SUSP_AGE_GROUP))  # Appropriate values now present
+
+print(unique(crime_data$SUSP_RACE))  # Need to merge subjective values of "BLACK HISPANIC" and "WHITE HISPANIC" into more general "HISPANIC"
+# Replace 'BLACK HISPANIC' and 'WHITE HISPANIC' with 'HISPANIC'
+crime_data$SUSP_RACE <- replace(crime_data$SUSP_RACE, crime_data$SUSP_RACE %in% c("BLACK HISPANIC", "WHITE HISPANIC"), "HISPANIC")
+# Reprinting unique values for SUSP_RACE
+print(unique(crime_data$SUSP_RACE))  # Appropriate values now present
+
+print(unique(crime_data$SUSP_SEX))  # Need to replace string "U" (unknown) with NA
+# Replace "U" with NA in the SUSP_SEX column
+crime_data$SUSP_SEX <- ifelse(crime_data$SUSP_SEX == "U", NA, crime_data$SUSP_SEX)
+# Reprinting unique values for SUSP_SEX
+print(unique(crime_data$SUSP_SEX))  # Appropriate values now present
+
+print(unique(crime_data$VIC_AGE_GROUP))  # Same problems as the SUSP_AGE_GROUP column
+# Replace illegitimate values with NA
+crime_data$VIC_AGE_GROUP <- ifelse(crime_data$VIC_AGE_GROUP %in% legitimate_age_values, crime_data$VIC_AGE_GROUP, NA)
+# Reprinting unique values for VIC_AGE_GROUP
+print(unique(crime_data$VIC_AGE_GROUP))  # Appropriate values now present
+
+print(unique(crime_data$VIC_RACE))  # Same problems as the SUSP_RACE column
+# Replace 'BLACK HISPANIC' and 'WHITE HISPANIC' with 'HISPANIC'
+crime_data$VIC_RACE <- replace(crime_data$VIC_RACE, crime_data$VIC_RACE %in% c("BLACK HISPANIC", "WHITE HISPANIC"), "HISPANIC")
+# Reprinting unique values for VIC_RACE
+print(unique(crime_data$VIC_RACE))  # Appropriate values now present
+
+print(unique(crime_data$VIC_SEX))  # Need to replace unexplained values of "E" and "D" with NA
+# Replace "E" and "D" with NA in the SUSP_SEX column
+crime_data$VIC_SEX <- ifelse(crime_data$VIC_SEX %in% c("E", "D"), NA, crime_data$VIC_SEX)
+# Reprinting unique values for VIC_SEX
+print(unique(crime_data$VIC_SEX))  # Appropriate values now present
+```
+
+**Type Conversion: Creating Factor-Type Variables**
+Many of the newly-cleaned fields are still coded as character-type. To be more useful analytically, they should be changed to factor-type.
+
+```{r}
+# List of columns to convert to factor-type
+cols_for_factor_conversion <- c("KY_CD", "OFNS_DESC", "LAW_CAT_CD", "BORO_NM", "PREM_TYP_DESC", "SUSP_AGE_GROUP", 
+                     "SUSP_RACE", "SUSP_SEX", "VIC_AGE_GROUP", "VIC_RACE", "VIC_SEX")
+
+# Convert these columns to factor type
+crime_data[cols_for_factor_conversion] <- lapply(crime_data[cols_for_factor_conversion], factor)
+
+# Checking results of conversion
+str(crime_data)  # Conversions look good, but there are far too many categories for "OFNS_DESC" (type of crime) and "PREM_TYP_DESC" (place where the crime occurred.)
+# I need to simplify these categories
+```
+
+**Simplifying/Merging Categories in the Crime Type (OFNS_DESC) and Crime Location (PREM_TYP_DESC) Fields**
+The PREM_TYP_DESC field contains 73 different categories to describe the location where a reported crime was committed. 
+
+To simplify this field for analytical purposes, I will condense these 73 highly-specified categories into a new column (LOCATION) with ten condensed categories:
+1. Private Residence
+2. Public Housing
+3. Public Area
+4. Public Transportation
+5. Private Transportation
+6. Place of Worship
+7. Retail Business
+8. Non-Retail Business
+9. Public Building
+10. Unclassified Business
+
+```{r}
+# Creating new "LOCATION" column with condensed categories
+# I can do this using dplyr and its mutate() and case_when() functions
+# Create a new column with the full condensed categories using mutate() and case_when()
+crime_data <- crime_data %>%
+  mutate(LOCATION = case_when(
+    PREM_TYP_DESC == "OTHER" ~ NA_character_,
+    PREM_TYP_DESC == "STREET" ~ "Public Area",
+    PREM_TYP_DESC == "RESIDENCE - APT. HOUSE" ~ "Private Residence",
+    PREM_TYP_DESC == "BUS STOP" ~ "Public Transportation",
+    PREM_TYP_DESC == "RESIDENCE-HOUSE" ~ "Private Residence",
+    PREM_TYP_DESC == "HOTEL/MOTEL" ~ "Non-Retail Business",
+    PREM_TYP_DESC == "HOSPITAL" ~ "Public Building",
+    PREM_TYP_DESC == "RESIDENCE - PUBLIC HOUSING" ~ "Public Housing",
+    PREM_TYP_DESC == "TAXI (LIVERY LICENSED)" ~ "Private Transportation",
+    PREM_TYP_DESC == "PARK/PLAYGROUND" ~ "Public Area",
+    PREM_TYP_DESC == "DEPARTMENT STORE" ~ "Retail Business",
+    PREM_TYP_DESC == "CHURCH" ~ "Place of Worship",
+    PREM_TYP_DESC == "STORAGE FACILITY" ~ "Non-Retail Business",
+    PREM_TYP_DESC == "CHAIN STORE" ~ "Retail Business",
+    PREM_TYP_DESC == "PRIVATE/PAROCHIAL SCHOOL" ~ "Public Building",
+    PREM_TYP_DESC == "PUBLIC SCHOOL" ~ "Public Building",
+    PREM_TYP_DESC == "BEAUTY & NAIL SALON" ~ "Retail Business",
+    PREM_TYP_DESC == "CANDY STORE" ~ "Retail Business",
+    PREM_TYP_DESC == "BAR/NIGHT CLUB" ~ "Retail Business",
+    PREM_TYP_DESC == "COMMERCIAL BUILDING" ~ "Non-Retail Business",
+    PREM_TYP_DESC == "RESTAURANT/DINER" ~ "Retail Business",
+    PREM_TYP_DESC == "PARKING LOT/GARAGE (PRIVATE)" ~ "Private Transportation",
+    PREM_TYP_DESC == "PUBLIC BUILDING" ~ "Public Building",
+    PREM_TYP_DESC == "COLLEGE/UNIVERSITY" ~ "Public Building",
+    PREM_TYP_DESC == "TRANSIT - NYC SUBWAY" ~ "Public Transportation",
+    PREM_TYP_DESC == "DOCTOR/DENTIST OFFICE" ~ "Public Building",
+    PREM_TYP_DESC == "STORE UNCLASSIFIED" ~ "Unclassified Business",
+    PREM_TYP_DESC == "CLOTHING/BOUTIQUE" ~ "Retail Business",
+    PREM_TYP_DESC == "PARKING LOT/GARAGE (PUBLIC)" ~ "Public Transportation",
+    PREM_TYP_DESC == "CONSTRUCTION SITE" ~ "Non-Retail Business",
+    PREM_TYP_DESC == "SMALL MERCHANT" ~ "Retail Business",
+    PREM_TYP_DESC == "GROCERY/BODEGA" ~ "Retail Business",
+    PREM_TYP_DESC == "REAL ESTATE" ~ "Non-Retail Business",
+    PREM_TYP_DESC == "BANK" ~ "Non-Retail Business",
+    PREM_TYP_DESC == "FACTORY/WAREHOUSE" ~ "Non-Retail Business",
+    PREM_TYP_DESC == "SYNAGOGUE" ~ "Place of Worship",
+    PREM_TYP_DESC == "SOCIAL CLUB/POLICY" ~ "Unclassified Business",
+    PREM_TYP_DESC == "VARIETY STORE" ~ "Retail Business",
+    PREM_TYP_DESC == "LIQUOR STORE" ~ "Retail Business",
+    PREM_TYP_DESC == "GYM/FITNESS FACILITY" ~ "Non-Retail Business",
+    PREM_TYP_DESC == "CHECK CASHING BUSINESS" ~ "Non-Retail Business",
+    PREM_TYP_DESC == "FOOD SUPERMARKET" ~ "Retail Business",
+    PREM_TYP_DESC == "BUS (NYC TRANSIT)" ~ "Public Transportation",
+    PREM_TYP_DESC == "HIGHWAY/PARKWAY" ~ "Public Transportation",
+    PREM_TYP_DESC == "GAS STATION" ~ "Retail Business",
+    PREM_TYP_DESC == "DRUG STORE" ~ "Retail Business",
+    PREM_TYP_DESC == "JEWELRY" ~ "Retail Business",
+    PREM_TYP_DESC == "FAST FOOD" ~ "Retail Business",
+    PREM_TYP_DESC == "TRANSIT FACILITY (OTHER)" ~ "Public Transportation",
+    PREM_TYP_DESC == "MOSQUE" ~ "Place of Worship",
+    PREM_TYP_DESC == "LOAN COMPANY" ~ "Non-Retail Business",
+    PREM_TYP_DESC == "TELECOMM. STORE" ~ "Retail Business",
+    PREM_TYP_DESC == "ATM" ~ "Public Area",
+    PREM_TYP_DESC == "MARINA/PIER" ~ "Public Area",
+    PREM_TYP_DESC == "BUS (OTHER)" ~ "Public Transportation",
+    PREM_TYP_DESC == "AIRPORT TERMINAL" ~ "Public Transportation",
+    PREM_TYP_DESC == "OTHER HOUSE OF WORSHIP" ~ "Place of Worship",
+    PREM_TYP_DESC == "OPEN AREAS (OPEN LOTS)" ~ "Public Area",
+    PREM_TYP_DESC == "DRY CLEANER/LAUNDRY" ~ "Retail Business",
+    PREM_TYP_DESC == "BRIDGE" ~ "Public Transportation",
+    PREM_TYP_DESC == "ABANDONED BUILDING" ~ "Public Area",
+    PREM_TYP_DESC == "TUNNEL" ~ "Public Transportation",
+    PREM_TYP_DESC == "SHOE" ~ "Retail Business",
+    PREM_TYP_DESC == "MOBILE FOOD" ~ "Retail Business",
+    PREM_TYP_DESC == "BUS TERMINAL" ~ "Public Transportation",
+    PREM_TYP_DESC == "PHOTO/COPY" ~ "Retail Business",
+    PREM_TYP_DESC == "BOOK/CARD" ~ "Retail Business",
+    PREM_TYP_DESC == "FERRY/FERRY TERMINAL" ~ "Public Transportation",
+    PREM_TYP_DESC == "TAXI (YELLOW LICENSED)" ~ "Private Transportation",
+    PREM_TYP_DESC == "TAXI/LIVERY (UNLICENSED)" ~ "Private Transportation",
+    PREM_TYP_DESC == "VIDEO STORE" ~ "Retail Business",
+    PREM_TYP_DESC == "CEMETERY" ~ "Public Area",
+    PREM_TYP_DESC == "TRAMWAY" ~ "Public Transportation",
+    PREM_TYP_DESC == "<NA>" ~ NA_character_,
+    TRUE ~ NA_character_
+  ))
+
+# Move the new column to the desired location
+crime_data <- crime_data %>% relocate(LOCATION, .after = "PREM_TYP_DESC")
+
+# Checking values in new column
+print(unique(crime_data$LOCATION))
+
+# Data-checking the mapping
+# Check each unique value of PREM_TYP_DESC and its associated value in LOCATION
+unique_location_mappings <- crime_data %>%
+  group_by(PREM_TYP_DESC, LOCATION) %>%
+  summarise(count = n()) %>%
+  arrange(PREM_TYP_DESC, LOCATION)
+
+# Print the unique_mappings data frame
+print(unique_location_mappings)  # Everything looks good
+```
+
+The OFNS_DESC field contains 68 different categories to describe the type of crime which was committed.
+
+To simplify this field for analytical purposes, I will condense these 73 highly-specified categories into a new column (CRIME_TYPE) with 9 condensed categories:
+
+```{r}
+# Creating new "CRIME TYPE" column with condensed categories
+# We can do this using dplyr and its mutate() and case_when() functions
+# Create a new column with the full condensed categories using mutate() and case_when()
+crime_data <- crime_data %>%
+  mutate(CRIME_TYPE = case_when(
+    is.na(OFNS_DESC) ~ NA_character_,
+    OFNS_DESC %in% c("SEX CRIMES", "RAPE", "PROSTITUTION & RELATED OFFENSES") ~ "Sexual Offenses",
+    OFNS_DESC %in% c("ASSAULT 3 & RELATED OFFENSES", "FELONY ASSAULT", "HOMICIDE-NEGLIGENT-VEHICLE", "HOMICIDE-NEGLIGENT,UNCLASSIFIE") ~ "Violent Crimes",
+    OFNS_DESC %in% c("ARSON", "ROBBERY", "BURGLARY", "BURGLAR'S TOOLS", "PETIT LARCENY", "GRAND LARCENY", "CRIMINAL TRESPASS", "POSSESSION OF STOLEN PROPERTY", "GRAND LARCENY OF MOTOR VEHICLE", "PETIT LARCENY OF MOTOR VEHICLE", "OTHER OFFENSES RELATED TO THEF") ~ "Property Crimes",
+    OFNS_DESC %in% c("DANGEROUS DRUGS", "LOITERING FOR DRUG PURPOSES", "INTOXICATED & IMPAIRED DRIVING", "INTOXICATED/IMPAIRED DRIVING", "UNDER THE INFLUENCE OF DRUGS", "ALCOHOLIC BEVERAGE CONTROL LAW") ~ "Drug/Alcohol Offenses",
+    OFNS_DESC %in% c("THEFT-FRAUD", "FORGERY", "FRAUDS", "OFFENSES INVOLVING FRAUD", "FRAUDULENT ACCOSTING", "THEFT OF SERVICES") ~ "Fraud and Financial Crimes",
+    OFNS_DESC %in% c("HARRASSMENT 2", "OFFENSES AGAINST PUBLIC ADMINI", "OFF. AGNST PUB ORD SENSBLTY &", "OFFENSES AGAINST PUBLIC SAFETY", "DISORDERLY CONDUCT", "DISRUPTION OF A RELIGIOUS SERV", "LOITERING/GAMBLING (CARDS, DIC", "GAMBLING", "LOITERING", "CRIMINAL MISCHIEF & RELATED OF") ~ "Offenses Against Public Order",
+    OFNS_DESC %in% c("VEHICLE AND TRAFFIC LAWS", "UNAUTHORIZED USE OF A VEHICLE", "OTHER TRAFFIC INFRACTION") ~ "Traffic Violations",
+    OFNS_DESC %in% c("ADMINISTRATIVE CODE", "ADMINISTRATIVE CODES", "OTHER STATE LAWS (NON PENAL LAW)", "OTHER STATE LAWS", "NEW YORK CITY HEALTH CODE", "AGRICULTURE & MRKTS LAW-UNCLASSIFIED", "NYS LAWS-UNCLASSIFIED FELONY", "NYS LAWS-UNCLASSIFIED VIOLATION") ~ "Administrative Offenses",
+    TRUE ~ "Miscellaneous"
+  ))
+
+# Move the new column to the desired location
+crime_data <- crime_data %>% relocate(CRIME_TYPE, .after = OFNS_DESC)
+
+# Checking values in new column
+print(unique(crime_data$CRIME_TYPE))
+
+# Data-checking the mapping
+# Check each unique value of PREM_TYP_DESC and its associated value in LOCATION
+unique_type_mappings <- crime_data %>%
+  group_by(OFNS_DESC, CRIME_TYPE) %>%
+  summarise(count = n()) %>%
+  arrange(OFNS_DESC, CRIME_TYPE)
+
+# Print the unique_mappings data frame
+print(unique_type_mappings)  # Everything looks good
+```
+
+**Creating New Month-Level Reporting Variable**
+It will be useful to have a column which references RPT_DT where each crime is reported at the month-year level rather than the day level.
+I may do this using the lubridate library.
+
+```{r}
+# Create new column referencing RPT_DT
+crime_data <- crime_data %>% mutate(REPORT_MY = floor_date(RPT_DT, "month"))
+
+# Move column to the desired location
+crime_data <- crime_data %>% relocate(REPORT_MY, .after = RPT_DT)
+```
+
+**Exporting New File**
+Now that the data cleaning/condensing is done, I can export the new file to .csv
+```{r}
+write.csv(crime_data, "crime_data_final.csv", row.names = TRUE)
+```
+
+**Importing New File**
+I can now import the new datafile and perform the appropriate transformations.
+```{r}
+# Reading file
+crime_data <- read.csv("crime_data_final.csv")
+
+# List of columns to convert to factor-type
+cols_for_factor_conversion <- c("KY_CD", "OFNS_DESC", "CRIME_TYPE", "LAW_CAT_CD", "BORO_NM", "PREM_TYP_DESC", "LOCATION", "SUSP_AGE_GROUP", 
+                     "SUSP_RACE", "SUSP_SEX", "VIC_AGE_GROUP", "VIC_RACE", "VIC_SEX")
+
+# Convert these columns to factor type
+crime_data[cols_for_factor_conversion] <- lapply(crime_data[cols_for_factor_conversion], factor)
+
+# Converting two columns to date type
+crime_data$RPT_DT <- as.Date(crime_data$RPT_DT)
+crime_data$REPORT_MY <- as.Date(crime_data$REPORT_MY)
+```
+
+**Plotting Crime Counts Over Time**
+
+To make an initial assessment of the 'shape' of the data over our chosen time frame, we chose to plot the overall count of reported crimes for each month in our dataset.
+The plot shows the magnitude of the number of crimes reported, and the overall trend in terms of whether there appears to be a visible increase or decrease total crimes reported per Month.
+
+Additionally, we strongly suspected (given the general consensus of crime-related academic literature) that there would be a repeating pattern in the number of crimes reported throughout a year - specifically, that it would be higher in some months than in others. We further suspected that this pattern would be year-agnostic, i.e. that each year's count of crimes by month would look broadly the same.
+
+Visual evidence of a repeating pattern would give us cause to examine the data for the presence of a core time-series data characteristic which we discuss later in the presentation: 'seasonality.'
+
+```{r, fig.height=3.75}
+# We use the dplyr package to summarize counts of crimes at month level
+agg_data <- crime_data %>% group_by(REPORT_MY) %>% summarise(count = n())
+
+# Plotting results using the ggplot2 package
+ggplot(agg_data, aes(x=REPORT_MY, y=count)) +
+  geom_line(color="blue", linewidth=1) +
+  scale_x_date(labels = date_format("%Y-%m"), breaks = "6 months") +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Reported Crime Counts per Month (2010-2015)",
+    x = "Year/Month Values, Six-Month Intervals",
+    y = "Count of Crimes"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size=16),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank()
+  )
+```
+
+The plot appears to show an overall decrease in the total amount of reported crimes over time. 
+Additionally, there does appear to be a consistent repeating 'shape' in the plot: a series of peaks and valleys which, though they vary in magnitude and don't look exactly the same, do suggest a recurring 'seasonal' pattern to the number of reported crimes.
+
+Next, I create new fields for the month and year each crime was reported, so that I can aggregate crime data at the month level independently of the year the crime was reported.
+
+**Creating New Fields and Aggregating Crime Counts by Month**
+
+I'll use the mutate() method to create new fields in the dataset:
+```{r}
+crime_data <- crime_data %>% mutate(Year = format(REPORT_MY, "%Y"), Month = format(REPORT_MY, "%m"))
+
+time_data <- crime_data %>% group_by(Year, Month) %>% summarise(count = n()) %>% arrange(Year, Month)
+```
+
+**Plot Reported Crime Average by Month and Total Crimes Reported by Year**
+
+The plots below allow me to explore two follow-up questions raised by the general plot above:
+
+1. Is there an evident pattern in the average number of crimes reported per month, independent of year? In other words, across the data, are there specific months where the average number of reported crimes is notably lower or higher?
+
+2. Is there in fact an overall decrease in the total number of crimes reported over time? If so, this provides additional interest in our 'repeating patterns' question: if the pattern that appears to exist in the first plot persists despite an overall downward trend in reported crimes, this could be additional evidence for a seasonal pattern of crime reports.
+
+```{r, fig.height=4}
+# Create a dataframe with the average number of crimes reported by month, independent of year
+avg_per_month <- time_data %>% group_by(Month) %>% summarise(avg_count = mean(count))
+
+# Plotting the results
+ggplot(avg_per_month, aes(x=Month, y=avg_count, group=1)) + # Add group=1 to aes
+  geom_line(color="blue", size=1) + 
+  geom_point(color="red", size=3, shape=21, fill="red") +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Average Number of Crimes per Month",
+    x = "Month",
+    y = "Average Count"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size=20),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "grey80"),
+    legend.position = "none"
+  ) +
+  scale_x_discrete(
+    labels = c("01" = "Jan", "02" = "Feb", "03" = "Mar", "04" = "Apr", 
+               "05" = "May", "06" = "Jun", "07" = "Jul", "08" = "Aug", 
+               "09" = "Sep", "10" = "Oct", "11" = "Nov", "12" = "Dec")
+  )
+
+
+# Create a dataframe with the total crimes reported in each year
+total_per_year <- time_data %>% group_by(Year) %>% summarise(total_count = sum(count))
+
+# Plotting the results
+# Assuming total_per_year has columns Year (as character or factor) and total_count as numeric
+ggplot(total_per_year, aes(x=Year, y=total_count, group=1)) + # Add group=1 to aes
+  geom_line(color="blue", size=1) +
+  geom_point(color="red", size=3, shape=21, fill="red") +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Total Number of Crimes per Year",
+    x = "Year",
+    y = "Total Count"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size=20),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "grey80"),
+    legend.position = "none"
+  )
+```
+
+These two plots provide interesting results.
+
+First, is is clear that some months of the year see a notably higher rate of reported crimes. By taking the average number of crimes reported by month, independent of year, I may observe that the average number of crimes reported is higher in warmer months and lowest in the winter.
+
+Second, the plot of overall reported crimes by year does indeed show an overall downward trend.
+
+Based on these plots, I am confident that the number of crimes reported in the time-series has a repeating 'seasonal' pattern, which I will now explore in more depth.
+
+**Seasonality in Crime Rates**
+
+The concept of seasonality in time-series analysis may be broadly defined as the presence of repeating variations which occur at specific, regular intervals. Based on my results so far, I expect to find a monthly seasonal element in the number of crimes reported over time.
+
+To investigate further, I will perform a seasonal trend decomposition using the forecast library. 
+
+Seasonal trend decomposition is a procedure for separating and quantifying patterns that recur seasonally in time-series data, the overarching trend of the data, and the residual components within the time series.
+
+```{r, fig.height = 4}
+# First, I aggregate the crime data to get the count of crimes per month
+aggregated_month_data <- crime_data %>% group_by(REPORT_MY) %>% summarise(crime_count = n())
+
+# Next, using the ts() method, I create a time-series object
+month_data_ts <- ts(aggregated_month_data$crime_count, frequency = 12)
+# Frequency set to 12 (months per year)
+
+# At this point, we may run the seasonal trend decomposition
+
+# We set the seasonal window parameter (which dictates how the seasonal component is estimated during the decomposition process) to 13 months. 
+# This means I'm allowing the seasonal pattern to change over time. By convention, we use an odd integer so that the window has a clear midpoint. 
+# If s.window = 13 (given monthly data), each point in the seasonal component is estimated using a localized window that includes the month itself and six months on either side.
+stl_model <- stl(month_data_ts, s.window = 13)
+
+# Calling the plots for the model
+plot(stl_model)
+```
+
+It is clear from these plots that seasonality is present and consistent, even as the total number of reported crimes in New York City trends down over time. 
+
+Based on the identification of a regular, recurring seasonal pattern in our data, I should therefore be able to perform another core process of time-series analysis, "forecasting," as long as I choose a forecasting process which explicitly accounts for seasonality. 
+
+NOTE: In the context of time-series analysis, "forecasting" refers to the process of estimating future values by analyzing and projecting the patterns observed in historical data.
+
+One possible forecasting process is SARIMA, or the Seasonal Autoregressive Integrated Moving Average. 
+Another candidate process is ETS, or the Exponential Smoothing State Space Model, which works well for univariate time series data which demonstrate seasonal components.
+
+While SARIMA explicitly models the seasonal and non-seasonal components, ETS applies smoothing parameters to trend, seasonal, and error components.
+
+I will fit both models, compare them using their AIC and BIC values, select the best model, and then use it to forecast crime rates after the end point of the subsetted data.
+
+**Fitting Models and Validating**
+```{r}
+# Fitting SARIMA
+sarima_model <- auto.arima(month_data_ts, seasonal = TRUE)
+
+# Fitting ETS
+ets_model <- ets(month_data_ts)
+
+# Fetching and returning the models' AIC and BIC values
+aic_vals <- c(AIC(sarima_model), AIC(ets_model))
+bic_vals <- c(BIC(sarima_model), BIC(ets_model))
+
+print("AIC values for SARIMA, ETS:")
+aic_vals
+
+print("BIC values for SARIMA, ETS:")
+bic_vals
+```
+
+Both the AIC and BIC values are lower for the SARIMA model, indicating it is better-fitted to the data. Therefore, I will forecast using SARIMA.
+
+**Forecasting Using the SARIMA Model**
+
+Using the SARIMA model, I will generate a forecast for the number crimes reported for the subsequent 12 months after the end point of the data, 12/31/2015.
+
+```{r}
+# Generate forecast for the subsequent 12 months
+sarima_forecast <- forecast(sarima_model, h = 12)  # In this sense, h = 12 means I'm forecasting 12 'periods,' which in this context means 12 months
+
+# Plot the forecasted data
+plot(sarima_forecast)
+```
+
+In this forecasting plot, the blue line represents the forecast values for reported crimes for the year subsequent to the end point of our data. The shaded areas represent the confidence intervals surrounding the forecast values - the model is estimating the range within which the actual future values will be expected to fall.
+
+Note that the forecast generated by the SARIMA model both reproduces the general seasonality evident in the observed data and also fits with the overall trend of a general reduction in crime over time. In the context of what we already know about the data, the forecast appears reasonable.
+
+We may also extract the actual forecast values and confidence intervals, as follows:
+
+```{r}
+# Extracting forcasted values
+forecasted_values <- sarima_forecast$mean
+print("Forecasted values:")
+forecasted_values
+
+# Extracting confidence interval values
+low_ci <- sarima_forecast$lower[, 2]  # 95% lower limit
+upper_ci <- sarima_forecast$upper[, 2]  # 95% upper limit
+
+print("Lower confidence interval values:")
+low_ci
+
+print("Upper confidence interval values:")
+upper_ci
+```
+
+**Crime-Type Cluster Analysis** 
+
+My next core question is whether specific types of crimes been reported more frequently at particular times.
+
+This would be best approached using the dtwclust package, which allows for various "time-series clustering" methods and employs Dynamic Time-Warping (DTW). 
+
+DTW allows for measures of distance between different time-series in a way that non-linear warping of the times of observations across a series can find a more optimal alignment between the two series. This essentially means that distance can be minimized more effectively than if I consider values only on an "identical-date basis," and is common practice in time-series modeling.
+
+I implement these techniques as follows:
+
+```{r, fig.keep="last", fig.height=3.75}
+# For proper input to the 'dtwclust::tsclust()' method, I need to create a matrix of the multiple time-series that I intend to perform Cluster Analysis on
+
+# Below, I perform the necessary data handling to create said matrix
+# The matrix is constructed such that rows are "timestamps" and each CRIME_TYPE is a column containing counts of that crime type on that date
+report_types <- select(crime_data, one_of(c("REPORT_MY", "CRIME_TYPE")))
+
+# Now, I reorganize the relevant data, grouping the report dates and crime types, and create a count of each crime type by date
+# Then, we pivot those counts out to their own columns, creating the format we require
+report_types <- report_types %>%
+                  group_by(REPORT_MY, CRIME_TYPE) %>%
+                    summarize(count=n()) %>%
+                      pivot_wider(names_from=CRIME_TYPE, values_from=count)
+
+# Using these data, I create a Time-Series object for each column represented by the various crime types, with a frequency of 12 to denote the Month-Year organization
+# Note that I may omit the 'NA' column from 'report_types' as I assume it's not likely to be useful for understanding any clustered behaviors
+type_AO_ts <- ts(report_types$`Administrative Offenses`, frequency = 12)
+type_DA_ts <- ts(report_types$`Drug/Alcohol Offenses`, frequency = 12)
+type_FF_ts <- ts(report_types$`Fraud and Financial Crimes`, frequency = 12) 
+type_M_ts <-  ts(report_types$`Miscellaneous`, frequency = 12) 
+type_PO_ts <- ts(report_types$`Offenses Against Public Order`, frequency = 12) 
+type_PC_ts <- ts(report_types$`Property Crimes`, frequency = 12) 
+type_SO_ts <- ts(report_types$`Sexual Offenses`, frequency = 12) 
+type_TV_ts <- ts(report_types$`Traffic Violations`, frequency = 12) 
+type_VC_ts <- ts(report_types$`Violent Crimes`, frequency = 12) 
+
+# Now that the Time-Series objects are available, I create a list of them to pass to 'tclust()'
+# This method requires either a list, a numeric matrix, or a data frame of the appropriate format
+type_series_list <- list(type_SO_ts, type_VC_ts, type_PC_ts, type_DA_ts, type_FF_ts,
+                         type_PO_ts, type_TV_ts, type_AO_ts, type_M_ts)
+
+# Finally, I create the crime-type clustering, using a seed for reproducibility
+# The DTW distance calculations are done on a pairwise basis
+# k-means clustering is then applied to these DTW-distances in order to group them
+# These groupings happen around "centroids" 
+# Centroids are synthetic, representative time-series that minimize the sum of distances to all other time-series in the cluster, 
+# They may be understood as the mean of the time-series within a cluster when grouping by the k-means process
+type.clust <- tsclust(series=type_series_list, type="fuzzy", k=3L, seed=1234)
+
+# I selected 3 clusters as a starting point under the assumption that there might be clusters such as 'low-frequency', 'mid-frequency', and 'high-frequency' crimes.
+type.plot <- plot(type.clust) +
+             labs(title="Frequency-Clustered Crime Types", x="Time (Months)", y="Crime Counts")
+
+# This assumption is borne out by the resulting plots
+type.plot
+```
+
+There is a visibly evident difference between these various clusters, with in-series ranges of about 500-1000, 1000-2000, and 3000-4000.
+Centroids are visualized with the intermittent gray lines "central" to each cluster.
+
+Cluster 1 is composed of:
+- Administrative Offenses
+- Sexual Offenses
+- Traffic Violations
+- Fraud and Financial Crimes
+- Miscellaneous
+
+Cluster 2 is composed of:
+
+- Drug & Alcohol Offenses
+- Violent Crimes
+
+Cluster 3 is composed of:
+
+- Offenses Against Public Order
+- Property Crimes
+
+From here, I might reasonably explore other questions such as:
+
+1. Which crime type exhibits the smallest/greatest degree of variance overall?
+2. Do any crime types' counts change at intervals different from others?
